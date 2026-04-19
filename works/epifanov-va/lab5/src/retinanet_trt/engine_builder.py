@@ -1,6 +1,7 @@
 from collections import OrderedDict
 import os
 
+import onnx
 import tensorrt as trt
 import torch
 import torchvision
@@ -77,6 +78,16 @@ def export_onnx(onnx_path=ONNX_PATH):
             dynamo=False,
             verbose=False,
         )
+    print("3. Validating ONNX...")
+    try:
+        onnx_model = onnx.load(onnx_path)
+        onnx.checker.check_model(onnx_model)
+    except Exception as e:
+        # Remove invalid ONNX file to avoid reusing a corrupted artifact.
+        if os.path.exists(onnx_path):
+            os.remove(onnx_path)
+        raise RuntimeError(f"ONNX validation failed for '{onnx_path}': {e}") from e
+    print("   ONNX validation passed.")
     print(f"ONNX saved: {onnx_path}")
 
 
@@ -88,14 +99,14 @@ def build_trt_engine(
     calibration_frames=DEFAULT_CALIBRATION_FRAMES,
     calibration_cache=CALIBRATION_CACHE_PATH,
 ):
-    print("3. Building TensorRT Engine...")
+    print("4. Building TensorRT Engine...")
     engine_dir = os.path.dirname(engine_path)
     if engine_dir:
         os.makedirs(engine_dir, exist_ok=True)
 
     requested_precision = precision.lower().strip()
-    if requested_precision not in {"int8", "fp16"}:
-        raise ValueError(f"Unsupported precision: {precision}. Use 'int8' or 'fp16'.")
+    if requested_precision not in {"int8", "fp16", "fp32"}:
+        raise ValueError(f"Unsupported precision: {precision}. Use 'int8', 'fp16' or 'fp32'.")
 
     logger = None
     builder = None

@@ -17,8 +17,8 @@ def parse_args():
     parser.add_argument(
         "--precision",
         default="int8",
-        choices=["int8", "fp16"],
-        help="Engine precision (default: int8)",
+        choices=["int8", "fp16", "fp32"],
+        help="Engine precision: int8 | fp16 | fp32 (default: int8)",
     )
     parser.add_argument(
         "--calib-video",

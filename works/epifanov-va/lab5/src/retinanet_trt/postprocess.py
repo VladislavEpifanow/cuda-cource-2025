@@ -36,17 +36,17 @@ class RetinaPostprocessor:
         self.model.detections_per_img = max_det
         self.model.topk_candidates = int(max(50, topk_candidates))
 
-        self.mean = torch.tensor(
+        mean = torch.tensor(
             self.model.transform.image_mean, device="cuda", dtype=torch.float32
         ).view(1, 3, 1, 1)
-        self.std = torch.tensor(
+        std = torch.tensor(
             self.model.transform.image_std, device="cuda", dtype=torch.float32
         ).view(1, 3, 1, 1)
 
         # Precompute anchor split sizes for the fixed 640x640 input.
         with torch.no_grad():
             dummy = torch.zeros((1, 3, INPUT_HEIGHT, INPUT_WIDTH), device="cuda", dtype=torch.float32)
-            norm = (dummy - self.mean) / self.std
+            norm = (dummy - mean) / std
             features = self.model.backbone(norm)
             if isinstance(features, torch.Tensor):
                 features = OrderedDict([("0", features)])

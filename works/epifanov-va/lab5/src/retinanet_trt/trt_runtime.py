@@ -58,6 +58,12 @@ class TrtModel:
         self.input_tensor = torch.empty(
             (1, 3, INPUT_HEIGHT, INPUT_WIDTH), dtype=input_torch_dtype, device="cuda"
         )
+        self.host_input_tensor = torch.empty(
+            (1, 3, INPUT_HEIGHT, INPUT_WIDTH),
+            dtype=input_torch_dtype,
+            device="cpu",
+            pin_memory=True,
+        )
         self.output_tensors = {}
 
         self.context.set_tensor_address(self.input_name, int(self.input_tensor.data_ptr()))
@@ -81,10 +87,13 @@ class TrtModel:
         if not input_data_np.flags["C_CONTIGUOUS"]:
             input_data_np = np.ascontiguousarray(input_data_np)
 
+        cpu_src = torch.from_numpy(input_data_np)
+        self.host_input_tensor.copy_(cpu_src, non_blocking=False)
+
         consumer_stream = torch.cuda.current_stream()
         with torch.cuda.stream(self.trt_stream):
-            # Input comes from pageable NumPy memory, so use explicit blocking copy for clarity.
-            self.input_tensor.copy_(torch.from_numpy(input_data_np), non_blocking=False)
+            # Async H2D copy is effective when source is pinned host memory.
+            self.input_tensor.copy_(self.host_input_tensor, non_blocking=True)
             ok = self.context.execute_async_v3(stream_handle=self.trt_stream.cuda_stream)
             if ok:
                 self.trt_done_event.record(self.trt_stream)
@@ -92,12 +101,19 @@ class TrtModel:
             raise RuntimeError("TensorRT inference failed (execute_async_v3 returned False).")
         consumer_stream.wait_event(self.trt_done_event)
 
-        return self.output_tensors
+        return {name: tensor.clone() for name, tensor in self.output_tensors.items()}
 
     def close(self):
         if self._closed:
             return
+        if self.trt_stream is not None:
+            try:
+                # Ensure queued TRT work is finished before releasing GPU resources.
+                self.trt_stream.synchronize()
+            except Exception:
+                pass
         self.output_tensors.clear()
+        self.host_input_tensor = None
         self.input_tensor = None
         self.context = None
         self.engine = None

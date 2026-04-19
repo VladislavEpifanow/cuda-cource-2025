@@ -8,7 +8,7 @@
 ## Что сделано
 
 - Экспорт RetinaNet в ONNX
-- Сборка TensorRT engine (INT8 по умолчанию, есть FP16)
+- Сборка TensorRT engine (INT8 по умолчанию, есть FP16 и FP32)
 - Обработка видео по кадрам
 - Декодирование предсказаний, NMS и фильтрация по confidence
 - Сохранение результата в выходной видеофайл
@@ -62,6 +62,12 @@ python src/build_engine.py --precision int8 --calib-video data/videos/test.mp4 -
 
 ```bash
 python src/build_engine.py --precision fp16
+```
+
+Если нужен FP32:
+
+```bash
+python src/build_engine.py --precision fp32
 ```
 
 2. Запустить обработку:
