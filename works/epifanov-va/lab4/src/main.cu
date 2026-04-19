@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <algorithm>
+#include <chrono>
 #include "radix_sort.h"
 
 #define CUDA_CHECK(err) \
@@ -14,6 +16,7 @@ if(err != cudaSuccess){ \
 template <typename T>
 void test_radix_sort(size_t N) {
     printf("Testing %zu elements of type %s\n", N, (sizeof(T) == 4 ? "int32" : "int64"));
+    const int n = static_cast<int>(N);
 
     T* h_data = new T[N];
     T* h_out = new T[N];
@@ -26,13 +29,11 @@ void test_radix_sort(size_t N) {
     }
 
     // CPU sort
-    clock_t start = clock();
-    qsort(h_ref, N, sizeof(T), [](const void* a, const void* b) {
-        T va = *(T*)a, vb = *(T*)b;
-        return (va > vb) - (va < vb);
-    });
-    double cpu_time = (double)(clock() - start)/CLOCKS_PER_SEC;
-    printf("CPU qsort time: %.6f sec\n", cpu_time);
+    auto cpu_start = std::chrono::steady_clock::now();
+    std::sort(h_ref, h_ref + N);
+    auto cpu_end = std::chrono::steady_clock::now();
+    double cpu_time = std::chrono::duration<double>(cpu_end - cpu_start).count();
+    printf("CPU std::sort time: %.6f sec\n", cpu_time);
 
     // GPU memory
     T* d_input; 
@@ -47,19 +48,19 @@ void test_radix_sort(size_t N) {
     cudaEventCreate(&gstop);
 
     cudaEventRecord(gstart);
-    radix_sort<T>(d_input, d_output, N);
+    T* d_sorted = radix_sort<T>(d_input, d_output, n);
     cudaEventRecord(gstop);
     cudaEventSynchronize(gstop);
     float gpu_time;
     cudaEventElapsedTime(&gpu_time, gstart, gstop);
     gpu_time /= 1000.0f; // convert to seconds
 
-    CUDA_CHECK(cudaMemcpy(h_out, d_input, N*sizeof(T), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_out, d_sorted, N*sizeof(T), cudaMemcpyDeviceToHost));
     
     // check correctness
     bool correct = true;
-    for (size_t i = 1; i < N; i++) {
-        if (h_out[i-1] > h_out[i]) { correct = false; break; }
+    for (size_t i = 0; i < N; i++) {
+        if (h_out[i] != h_ref[i]) { correct = false; break; }
     }
 
     printf("GPU Radix Sort time: %.6f sec, Correctness: %s\n", gpu_time, correct ? "PASS" : "FAIL");
@@ -79,8 +80,8 @@ void test_radix_sort(size_t N) {
 
     // check correctness
     correct = true;
-    for (size_t i = 1; i < N; i++) {
-        if (h_out[i-1] > h_out[i]) { correct = false; break; }
+    for (size_t i = 0; i < N; i++) {
+        if (h_out[i] != h_ref[i]) { correct = false; break; }
     }
 
     printf("Thrust sort time: %.6f sec, Correctness: %s\n", gpu_thrust_time, correct ? "PASS" : "FAIL");
@@ -96,10 +97,12 @@ void test_radix_sort(size_t N) {
 }
 
 int main() {
-    // test sizes: 1e5, 5e5, 1e6 as per requirements
-    size_t sizes[] = {100000, 500000, 1000000};
+    srand(42);
 
-    for (size_t i = 0; i < 3; i++) {
+    // test sizes: 1e5, 5e5, 1e6, 2e6 as per requirements
+    size_t sizes[] = {100000, 500000, 1000000, 2000000};
+
+    for (size_t i = 0; i < 4; i++) {
         size_t N = sizes[i];
         test_radix_sort<int32_t>(N);
         test_radix_sort<int64_t>(N);

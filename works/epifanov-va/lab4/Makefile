@@ -1,5 +1,5 @@
 NVCC = nvcc
-NVCC_FLAGS = -O2 -arch=sm_70 -Iinclude
+NVCC_FLAGS = -O2 -arch=sm_75 -std=c++17 -Iinclude
 TARGET = radix_sort
 SOURCES = src/main.cu src/radix_sort.cu
 
