@@ -11,7 +11,6 @@ from .config import (
     DEFAULT_TOPK_CANDIDATES,
     INPUT_HEIGHT,
     INPUT_WIDTH,
-    WEIGHTS,
 )
 
 
@@ -28,8 +27,8 @@ class RetinaPostprocessor:
         topk_candidates=DEFAULT_TOPK_CANDIDATES,
         pre_nms_score_thresh=None,
     ):
-        self.conf_thresh = conf_thresh
-        self.model = torchvision.models.detection.retinanet_resnet50_fpn(weights=WEIGHTS).eval().cuda()
+        weights = torchvision.models.detection.RetinaNet_ResNet50_FPN_Weights.DEFAULT
+        self.model = torchvision.models.detection.retinanet_resnet50_fpn(weights=weights).eval().cuda()
         if pre_nms_score_thresh is None:
             pre_nms_score_thresh = conf_thresh
         self.model.score_thresh = float(max(0.01, min(pre_nms_score_thresh, 0.99)))
@@ -77,18 +76,13 @@ class RetinaPostprocessor:
             split_head, [self.split_anchors], [(INPUT_HEIGHT, INPUT_WIDTH)]
         )[0]
 
-        if detections["scores"].numel() == 0:
-            return [], [], []
-
-        keep = detections["scores"] >= self.conf_thresh
-        boxes = detections["boxes"][keep]
-        scores = detections["scores"][keep]
-        labels = detections["labels"][keep]
+        boxes = detections["boxes"]
+        scores = detections["scores"]
+        labels = detections["labels"]
 
         if scores.numel() == 0:
             return [], [], []
 
-        boxes = boxes.clone()
         boxes[:, [0, 2]] *= float(orig_w) / float(INPUT_WIDTH)
         boxes[:, [1, 3]] *= float(orig_h) / float(INPUT_HEIGHT)
         boxes[:, [0, 2]] = boxes[:, [0, 2]].clamp(0, max(orig_w - 1, 0))

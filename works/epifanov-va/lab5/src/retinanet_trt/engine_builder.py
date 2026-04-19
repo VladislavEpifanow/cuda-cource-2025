@@ -43,7 +43,16 @@ class RetinaNetHeadExport(torch.nn.Module):
             features = OrderedDict([("0", features)])
         features = list(features.values())
         head_outputs = self.model.head(features)
-        return head_outputs["cls_logits"], head_outputs["bbox_regression"]
+        cls_logits = head_outputs["cls_logits"]
+        bbox_regression = head_outputs["bbox_regression"]
+
+        # Keep ONNX export contract stable across torchvision/exporter versions.
+        if isinstance(cls_logits, (list, tuple)):
+            cls_logits = torch.cat(cls_logits, dim=1)
+        if isinstance(bbox_regression, (list, tuple)):
+            bbox_regression = torch.cat(bbox_regression, dim=1)
+
+        return cls_logits, bbox_regression
 
 
 def export_onnx(onnx_path=ONNX_PATH):
@@ -84,34 +93,60 @@ def build_trt_engine(
     if engine_dir:
         os.makedirs(engine_dir, exist_ok=True)
 
-    logger = trt.Logger(trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
-    parser = trt.OnnxParser(network, logger)
-    config = builder.create_builder_config()
+    requested_precision = precision.lower().strip()
+    if requested_precision not in {"int8", "fp16"}:
+        raise ValueError(f"Unsupported precision: {precision}. Use 'int8' or 'fp16'.")
 
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
-
-    with open(onnx_path, "rb") as f:
-        if not parser.parse(f.read()):
-            print("ERROR: Failed to parse ONNX")
-            for i in range(parser.num_errors):
-                print(parser.get_error(i))
-            raise SystemExit(1)
-
-    input_tensor = network.get_input(0)
-    profile = builder.create_optimization_profile()
-    profile.set_shape(input_tensor.name, INPUT_SHAPE, INPUT_SHAPE, INPUT_SHAPE)
-    config.add_optimization_profile(profile)
-
-    precision = precision.lower().strip()
+    logger = None
+    builder = None
+    network = None
+    parser = None
+    config = None
+    profile = None
     calibrator = None
+    serialized_engine = None
+    try:
+        logger = trt.Logger(trt.Logger.WARNING)
+        builder = trt.Builder(logger)
+        effective_precision = requested_precision
+        if requested_precision == "int8":
+            if not builder.platform_has_fast_int8:
+                if builder.platform_has_fast_fp16:
+                    print("   WARNING: Fast INT8 is not supported on this GPU, falling back to FP16.")
+                    effective_precision = "fp16"
+                else:
+                    print("   WARNING: Fast INT8/FP16 are not supported on this GPU, using FP32.")
+                    effective_precision = "fp32"
+        elif requested_precision == "fp16":
+            if not builder.platform_has_fast_fp16:
+                print("   WARNING: Fast FP16 is not supported on this GPU, using FP32.")
+                effective_precision = "fp32"
 
-    if precision == "int8":
-        if not builder.platform_has_fast_int8:
-            print("   WARNING: Fast INT8 is not supported on this GPU, falling back to FP16.")
-            precision = "fp16"
-        else:
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+        parser = trt.OnnxParser(network, logger)
+        config = builder.create_builder_config()
+
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
+
+        with open(onnx_path, "rb") as f:
+            if not parser.parse(f.read()):
+                print("ERROR: Failed to parse ONNX")
+                errors = []
+                for i in range(parser.num_errors):
+                    err = str(parser.get_error(i))
+                    errors.append(err)
+                    print(err)
+                raise RuntimeError(
+                    "Failed to parse ONNX model with TensorRT parser."
+                    + (f" Parser errors: {' | '.join(errors)}" if errors else "")
+                )
+
+        input_tensor = network.get_input(0)
+        profile = builder.create_optimization_profile()
+        profile.set_shape(input_tensor.name, INPUT_SHAPE, INPUT_SHAPE, INPUT_SHAPE)
+        config.add_optimization_profile(profile)
+
+        if effective_precision == "int8":
             config.set_flag(trt.BuilderFlag.INT8)
             if builder.platform_has_fast_fp16:
                 config.set_flag(trt.BuilderFlag.FP16)
@@ -126,23 +161,34 @@ def build_trt_engine(
                 f"   INT8 Enabled (video calibration: {calibration_video}, "
                 f"samples: {calibration_frames})"
             )
-
-    if precision == "fp16":
-        if builder.platform_has_fast_fp16:
+        elif effective_precision == "fp16":
             config.set_flag(trt.BuilderFlag.FP16)
             print("   FP16 Enabled")
         else:
-            print("   WARNING: Fast FP16 is not supported on this GPU, using FP32.")
+            print("   FP32 Enabled")
 
-    if precision not in {"int8", "fp16"}:
-        raise ValueError(f"Unsupported precision: {precision}. Use 'int8' or 'fp16'.")
+        print("   Compiling engine...")
+        serialized_engine = builder.build_serialized_network(network, config)
+        if serialized_engine is None:
+            print("   ERROR: Build failed.")
+            raise RuntimeError("TensorRT engine build failed: build_serialized_network returned None.")
 
-    print("   Compiling engine...")
-    serialized_engine = builder.build_serialized_network(network, config)
-    if serialized_engine is None:
-        print("   ERROR: Build failed.")
-        raise SystemExit(2)
-
-    with open(engine_path, "wb") as f:
-        f.write(serialized_engine)
-    print(f"   SUCCESS! Engine saved: {engine_path}")
+        with open(engine_path, "wb") as f:
+            f.write(serialized_engine)
+        print(f"   SUCCESS! Engine saved: {engine_path}")
+    finally:
+        if config is not None:
+            try:
+                config.int8_calibrator = None
+            except Exception:
+                pass
+        if calibrator is not None:
+            calibrator.close()
+        del serialized_engine
+        del profile
+        del config
+        del parser
+        del network
+        del builder
+        del logger
+        del calibrator

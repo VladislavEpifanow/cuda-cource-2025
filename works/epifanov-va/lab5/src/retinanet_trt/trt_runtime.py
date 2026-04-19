@@ -5,13 +5,28 @@ import torch
 from .config import INPUT_HEIGHT, INPUT_WIDTH
 
 
+TRT_TO_TORCH_DTYPE = {
+    trt.DataType.FLOAT: torch.float32,
+    trt.DataType.HALF: torch.float16,
+    trt.DataType.INT8: torch.int8,
+    trt.DataType.INT32: torch.int32,
+    trt.DataType.BOOL: torch.bool,
+}
+if hasattr(trt.DataType, "UINT8"):
+    TRT_TO_TORCH_DTYPE[trt.DataType.UINT8] = torch.uint8
+if hasattr(trt.DataType, "INT64"):
+    TRT_TO_TORCH_DTYPE[trt.DataType.INT64] = torch.int64
+
+
 def trt_dtype_to_torch(dtype):
-    np_dtype = trt.nptype(dtype)
-    return torch.from_numpy(np.empty((), dtype=np_dtype)).dtype
+    if dtype not in TRT_TO_TORCH_DTYPE:
+        raise ValueError(f"Unsupported TensorRT dtype: {dtype}")
+    return TRT_TO_TORCH_DTYPE[dtype]
 
 
 class TrtModel:
     def __init__(self, engine_path):
+        self._closed = False
         self.logger = trt.Logger(trt.Logger.ERROR)
         self.runtime = trt.Runtime(self.logger)
 
@@ -23,6 +38,11 @@ class TrtModel:
         self.context = self.engine.create_execution_context()
         if self.context is None:
             raise RuntimeError("Failed to create TensorRT execution context.")
+
+        # Use a dedicated stream for TRT to avoid depending on global/current PyTorch stream.
+        self.trt_stream = torch.cuda.Stream()
+        # Event to synchronize TRT completion with the consumer stream.
+        self.trt_done_event = torch.cuda.Event(blocking=False)
 
         self.tensor_names = [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
         self.input_name = next(
@@ -54,14 +74,48 @@ class TrtModel:
             self.context.set_tensor_address(name, int(tensor.data_ptr()))
 
     def infer(self, input_data_np):
+        if self._closed:
+            raise RuntimeError("TrtModel is closed.")
         if input_data_np.dtype != np.float32:
             input_data_np = input_data_np.astype(np.float32)
         if not input_data_np.flags["C_CONTIGUOUS"]:
             input_data_np = np.ascontiguousarray(input_data_np)
 
-        self.input_tensor.copy_(torch.from_numpy(input_data_np), non_blocking=True)
-        ok = self.context.execute_async_v3(stream_handle=torch.cuda.current_stream().cuda_stream)
+        consumer_stream = torch.cuda.current_stream()
+        with torch.cuda.stream(self.trt_stream):
+            # Input comes from pageable NumPy memory, so use explicit blocking copy for clarity.
+            self.input_tensor.copy_(torch.from_numpy(input_data_np), non_blocking=False)
+            ok = self.context.execute_async_v3(stream_handle=self.trt_stream.cuda_stream)
+            if ok:
+                self.trt_done_event.record(self.trt_stream)
         if not ok:
             raise RuntimeError("TensorRT inference failed (execute_async_v3 returned False).")
+        consumer_stream.wait_event(self.trt_done_event)
 
         return self.output_tensors
+
+    def close(self):
+        if self._closed:
+            return
+        self.output_tensors.clear()
+        self.input_tensor = None
+        self.context = None
+        self.engine = None
+        self.runtime = None
+        self.logger = None
+        self.trt_done_event = None
+        self.trt_stream = None
+        self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass

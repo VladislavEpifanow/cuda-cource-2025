@@ -6,43 +6,44 @@ import tensorrt as trt
 import torch
 
 from .config import INPUT_HEIGHT, INPUT_WIDTH
+from .video_utils import preprocess_to_chw
 
 
-def _preprocess_for_calibration(frame):
-    resized = cv2.resize(frame, (INPUT_WIDTH, INPUT_HEIGHT), interpolation=cv2.INTER_LINEAR)
-    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    chw = np.transpose(rgb, (2, 0, 1))
-    return np.ascontiguousarray(chw)
-
-
-def _sample_video_frames(video_path, num_samples):
+def _iter_video_samples(video_path, num_samples):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open calibration video: {video_path}")
 
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    samples = []
+    try:
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if frame_count > 0:
+            sample_count = min(num_samples, frame_count)
+            target_indices = np.unique(
+                np.linspace(0, frame_count - 1, num=sample_count, dtype=np.int64)
+            )
+            target_pos = 0
+            frame_idx = 0
 
-    if frame_count > 0:
-        sample_count = min(num_samples, frame_count)
-        indices = np.linspace(0, frame_count - 1, num=sample_count, dtype=np.int32)
-        for idx in indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
-            ret, frame = cap.read()
-            if ret:
-                samples.append(_preprocess_for_calibration(frame))
-    else:
-        # Fallback for streams/codecs with unknown frame count.
-        while len(samples) < num_samples:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            samples.append(_preprocess_for_calibration(frame))
+            while target_pos < len(target_indices):
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-    cap.release()
-    if not samples:
-        raise RuntimeError(f"Failed to read any frames from calibration video: {video_path}")
-    return samples
+                if frame_idx == int(target_indices[target_pos]):
+                    yield preprocess_to_chw(frame)
+                    target_pos += 1
+
+                frame_idx += 1
+        else:
+            produced = 0
+            while produced < num_samples:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                yield preprocess_to_chw(frame)
+                produced += 1
+    finally:
+        cap.release()
 
 
 class VideoEntropyCalibrator(trt.IInt8EntropyCalibrator2):
@@ -58,8 +59,8 @@ class VideoEntropyCalibrator(trt.IInt8EntropyCalibrator2):
         self.cache_file = cache_file
         self.batch_size = 1
 
-        self.samples = _sample_video_frames(video_path=self.video_path, num_samples=self.num_samples)
-        self.cursor = 0
+        self.sample_iter = _iter_video_samples(video_path=self.video_path, num_samples=self.num_samples)
+        self.next_sample = self._pull_next_sample(required=True)
 
         self.device_input = torch.empty(
             (self.batch_size, 3, INPUT_HEIGHT, INPUT_WIDTH), dtype=torch.float32, device="cuda"
@@ -68,12 +69,22 @@ class VideoEntropyCalibrator(trt.IInt8EntropyCalibrator2):
     def get_batch_size(self):
         return self.batch_size
 
-    def get_batch(self, names):
-        if self.cursor >= len(self.samples):
+    def _pull_next_sample(self, required=False):
+        try:
+            return next(self.sample_iter)
+        except StopIteration:
+            if required:
+                raise RuntimeError(
+                    f"Failed to read any frames from calibration video: {self.video_path}"
+                )
             return None
 
-        batch_np = np.expand_dims(self.samples[self.cursor], axis=0)
-        self.cursor += 1
+    def get_batch(self, names):
+        if self.next_sample is None:
+            return None
+
+        batch_np = np.expand_dims(self.next_sample, axis=0)
+        self.next_sample = self._pull_next_sample(required=False)
 
         self.device_input.copy_(torch.from_numpy(batch_np), non_blocking=False)
         return [int(self.device_input.data_ptr())]
@@ -96,3 +107,8 @@ class VideoEntropyCalibrator(trt.IInt8EntropyCalibrator2):
         with open(self.cache_file, "wb") as f:
             f.write(cache)
         print(f"   Calibration cache saved: {self.cache_file}")
+
+    def close(self):
+        self.next_sample = None
+        self.sample_iter = None
+        self.device_input = None

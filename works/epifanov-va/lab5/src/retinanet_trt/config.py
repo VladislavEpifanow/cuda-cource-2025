@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import torchvision
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 ENGINE_PATH = str(PROJECT_ROOT / "artifacts" / "retinanet.engine")
@@ -20,5 +18,16 @@ DEFAULT_MAX_DET = 300
 DEFAULT_TOPK_CANDIDATES = 300
 DEFAULT_CALIBRATION_FRAMES = 128
 
-WEIGHTS = torchvision.models.detection.RetinaNet_ResNet50_FPN_Weights.DEFAULT
-COCO_CLASSES = WEIGHTS.meta["categories"]
+COCO_CLASSES = (
+    "__background__", "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
+    "truck", "boat", "traffic light", "fire hydrant", "N/A", "stop sign", "parking meter",
+    "bench", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
+    "giraffe", "N/A", "backpack", "umbrella", "N/A", "N/A", "handbag", "tie", "suitcase",
+    "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
+    "skateboard", "surfboard", "tennis racket", "bottle", "N/A", "wine glass", "cup", "fork",
+    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
+    "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed", "N/A",
+    "dining table", "N/A", "N/A", "toilet", "N/A", "tv", "laptop", "mouse", "remote",
+    "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "N/A",
+    "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+)

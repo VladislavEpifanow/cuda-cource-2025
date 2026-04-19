@@ -5,11 +5,16 @@ from .config import INPUT_HEIGHT, INPUT_WIDTH
 from .postprocess import get_class_name
 
 
-def preprocess_frame(frame):
-    h, w = frame.shape[:2]
+def preprocess_to_chw(frame):
     resized = cv2.resize(frame, (INPUT_WIDTH, INPUT_HEIGHT), interpolation=cv2.INTER_LINEAR)
     rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    batched = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
+    chw = np.transpose(rgb, (2, 0, 1))
+    return np.ascontiguousarray(chw)
+
+
+def preprocess_frame(frame):
+    h, w = frame.shape[:2]
+    batched = preprocess_to_chw(frame)[np.newaxis, ...]
     return np.ascontiguousarray(batched), h, w
 
 
